@@ -26,7 +26,7 @@ Python3+PyGame简单的多人联机斗地主游戏
 - Python3.9+
 
 ### 试玩
-[releases](releases)  
+[Releases](/releases)  
 
 ### 运行效果
 
