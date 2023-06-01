@@ -1,6 +1,6 @@
 # 斗地主游戏
 
-[![MIT Licence](https://badges.frapsoft.com/os/mit/mit.svg?v=103)](LICENSE.txt)  
+[![MIT Licence](https://badges.frapsoft.com/os/mit/mit.svg?v=103)](LICENSE)  
 
  
 
