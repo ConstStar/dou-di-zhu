@@ -57,8 +57,8 @@ class MyGame:
 
         # 创建 socket 对象
         self.__clientsocket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        host = "39.107.228.202"
-        # host = "127.0.0.1"
+        # host = "39.107.228.202"
+        host = "127.0.0.1"
         port = 9999
         self.__clientsocket.connect((host, port))
         self.__clientsocket.send((self.__room_name + "\n" + self.__player_name).encode("utf-8"))
