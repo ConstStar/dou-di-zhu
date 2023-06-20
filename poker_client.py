@@ -1,3 +1,4 @@
+import sys
 import enum
 import json
 import socket
@@ -8,6 +9,9 @@ from tkinter import messagebox
 
 import pygame
 
+host = "127.0.0.1"
+port = 9999
+
 
 class PLAY_STATE(enum.Enum):
     WAIT = 0
@@ -16,13 +20,305 @@ class PLAY_STATE(enum.Enum):
     FREE = 3
 
 
-RANKS = ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A']
-SUITS = ['♥', '◆', '♣', '♠']
+class Card:
+    RANKS = ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A']
+    SUITS = ['♥', '◆', '♣', '♠']
+    POWERS = {'3': 3, '4': 4, '5': 5, '6': 6, '7': 7, '8': 8, '9': 9, '10': 10, 'J': 11, 'Q': 12, 'K': 13, 'A': 14,
+              '2': 20, '小王': 99, '大王': 100}
+
+    def __init__(self, rank, suit):
+
+        if rank not in self.POWERS.keys():
+            raise Exception("无效牌【" + rank + "】")
+
+        self.__rank = rank
+        self.__suit = suit
+        self.__name = suit + rank
+        self.__power = self.POWERS[rank]
+
+    # 重载字符串表示方法
+    def __str__(self):
+        return self.__name
+
+    # 重载运算符实现排序
+    def __lt__(self, other):
+        if self.__power == other.__power:
+            return self.__suit < other.__suit
+
+        return self.__power < other.__power
+
+    def __eq__(self, other):
+        return self.__name == other.__name
+
+    def __hash__(self):
+        return hash(self.__name)
+
+    def get_rank(self):
+        return self.__rank
+
+    def get_power(self):
+        return self.__power
+
+
+# 出牌逻辑类
+# 用来获取出牌类型
+# 在客户端就做一些出牌逻辑判断
+# 直接告诉服务端出牌类型 服务端只判断类型是否正确
+# 不仅为了减轻服务器端压力 ‘
+# 也考虑到以后可以加一个功能：有多种出牌类型后用户可以手动选择一种
+class CardOrder:
+    CARD_ORDER_TYPE = enum.Enum('CARD_ORDER_TYPE', ('一张', '一对', '三张', '双三张',
+                                                    '三带一', '三带二', '四带一', '四带二', '四带两对',
+                                                    '顺子', '连对', '飞机', '飞机带对子', '炸弹', '王炸'))
+
+    @staticmethod
+    def make_card_list(card_str_list):
+        # 根据输入生成牌列表   判断每张牌是否有花色，分割花色生成牌列表
+        card_list = []
+        for card_str in card_str_list:
+            if len(card_str) == 0:
+                continue
+
+            if card_str[0] in Card.SUITS:
+                card_list.append(Card(card_str[1:], card_str[0]))
+            else:
+                card_list.append(Card(card_str, ""))
+
+        return card_list
+
+    @staticmethod
+    # 获取出牌类型
+    # 返回值为 出牌类型
+    # 如果返回值为-1 则出牌不符合规则
+    def get_cards_type(card_str_list):
+
+        # 通过卡片字符串列表 生成 卡片对象列表
+        cards = CardOrder.make_card_list(card_str_list)
+
+        cards.sort()
+
+        # 判断是否为一张
+        if len(cards) == 1:
+            return CardOrder.CARD_ORDER_TYPE['一张'].value
+
+        # 统计数量
+        card_count_map = {}
+        power_list = []
+        for item in cards:
+            power = item.get_power()
+            if power not in card_count_map.keys():
+                card_count_map[power] = 0
+            card_count_map[power] += 1
+        power_list = tuple(card_count_map.keys())
+
+        # 数量列表
+        count_list = []
+        # 每个数量对应牌的列表
+        count_card_map = {}
+        for power in card_count_map.keys():
+            count = card_count_map[power]
+            if count not in count_card_map.keys():
+                count_card_map[count] = []
+            count_card_map[count].append(power)
+        count_list = tuple(count_card_map.keys())
+
+        # 判断是否为一对
+        # 1. 计数只有1种
+        # 2. 有数量为2个的牌
+        # 3. 数量为2个的牌有1种
+        if len(count_card_map) == 1 \
+                and 2 in count_list \
+                and len(count_card_map[2]) == 1:
+            return CardOrder.CARD_ORDER_TYPE['一对'].value
+
+        # 判断是否为三张
+        # 1. 计数只有1种
+        # 2. 有数量为3个的牌
+        # 3. 数量为3个的牌有1种
+        if len(count_card_map) == 1 \
+                and 3 in count_list \
+                and len(count_card_map[3]) == 1:
+            return CardOrder.CARD_ORDER_TYPE['三张'].value
+
+        # 判断是否为双三张
+        # 1. 计数只有1种
+        # 2. 有数量为3个的牌
+        # 3. 数量为3个的牌有2种
+        if len(count_card_map) == 1 \
+                and 3 in count_list \
+                and len(count_card_map[3]) == 2:
+            return CardOrder.CARD_ORDER_TYPE['双三张'].value
+
+        # 判断是否为三带一
+        # 1. 计数只有2种
+        # 2. 有数量为3个的牌
+        # 3. 有数量为1个的牌
+        # 4. 数量为3个的牌有1种
+        # 5. 数量为1个的牌有1种
+        if len(count_card_map) == 2 \
+                and 3 in count_list \
+                and 1 in count_list \
+                and len(count_card_map[3]) == 1 \
+                and len(count_card_map[1]) == 1:
+            return CardOrder.CARD_ORDER_TYPE['三带一'].value
+
+        # 判断是否为三带二
+        # 1. 计数只有2种
+        # 2. 有数量为3个的牌
+        # 3. 有数量为2个的牌
+        # 4. 数量为3个的牌有1种
+        # 5. 数量为2个的牌有1种
+        if len(count_card_map) == 2 \
+                and 3 in count_list \
+                and 2 in count_list \
+                and len(count_card_map[3]) == 1 \
+                and len(count_card_map[2]) == 1:
+            return CardOrder.CARD_ORDER_TYPE['三带二'].value
+
+        # 判断是否为四带一
+        # 1. 计数只有2种
+        # 2. 有数量为4个的牌
+        # 3. 有数量为1个的牌
+        # 4. 数量为4个的牌有1种
+        # 5. 数量为1个的牌有1种
+        if len(count_card_map) == 2 \
+                and 4 in count_list \
+                and 1 in count_list \
+                and len(count_card_map[4]) == 1 \
+                and len(count_card_map[1]) == 1:
+            return CardOrder.CARD_ORDER_TYPE['四带一'].value
+
+        # 判断是否为四带二
+        # 1. 有数量为4个的牌
+        # 2. 数量为4个的牌有1种
+        # 3. 其他牌数量为2
+        if 4 in count_list \
+                and len(count_card_map[4]) == 1 \
+                and len(cards) - 4 == 2:
+            return CardOrder.CARD_ORDER_TYPE['四带二'].value
+
+        # 判断是否为四带两对
+        # 1. 计数只有2种
+        # 2. 有数量为4个的牌
+        # 3. 有数量为2个的牌
+        # 4. 数量为4个的牌有1种
+        # 5. 数量为2个的牌有2种
+        if len(count_card_map) == 2 \
+                and 4 in count_list \
+                and 2 in count_list \
+                and len(count_card_map[4]) == 1 \
+                and len(count_card_map[2]) == 2:
+            return CardOrder.CARD_ORDER_TYPE['四带两对'].value
+
+        # 判断是否为顺子
+        # 1. 计数只有1种
+        # 2. 有数量为1个的牌
+        # 5. 数量为1个的牌大于等于5种
+        if len(count_card_map) == 1 \
+                and 1 in count_list \
+                and len(count_card_map[1]) >= 5 \
+                and CardOrder.__is_continuous(count_card_map[1]):
+            return CardOrder.CARD_ORDER_TYPE['顺子'].value
+
+        # 判断是否为连对
+        # 1. 计数只有1种
+        # 2. 有数量为2个的牌
+        # 3. 数量为2个的牌大于等于3种
+        # 4. 数量为2个的牌连续
+        if len(count_card_map) == 1 \
+                and 2 in count_list \
+                and len(count_card_map[2]) >= 3 \
+                and CardOrder.__is_continuous(count_card_map[2]):
+            return CardOrder.CARD_ORDER_TYPE['连对'].value
+
+        # 判断是否为飞机
+        # 1. 有数量为3个的牌
+        # 2. 数量为3个的牌大于等于2
+        # 3. 牌数为3的牌种类数量 等于 其他牌数量
+        # 4. 数量为3个的牌连续
+        if 3 in count_list \
+                and len(count_card_map[3]) >= 2 \
+                and len(count_card_map[3]) == len(cards) - len(count_card_map[3]) * 3 \
+                and CardOrder.__is_continuous(count_card_map[3]):
+            return CardOrder.CARD_ORDER_TYPE['飞机'].value
+
+        # 特判特别的飞机（比如三个飞机带三个相同的牌）
+        # 1. 有数量为3个的牌
+        # 2. 数量为3个的牌大于等于3
+        # 3. 牌数为3的牌种类数量-1 等于 其他牌数量+3
+        # 4. 数量为3个的牌连续 有【牌数为3的牌种类数量-1】个连续的
+        if 3 in count_list \
+                and len(count_card_map[3]) >= 3 \
+                and len(count_card_map[3]) - 1 == len(cards) - len(count_card_map[3]) * 3 + 3:
+            return CardOrder.CARD_ORDER_TYPE['飞机'].value
+
+        # 判断是否为飞机带对子
+        # 1. 计数只有2种
+        # 2. 有数量为3个的牌
+        # 3. 有数量为2个的牌
+        # 4. 数量为3个的牌大于等于2
+        # 5. 牌数为2的牌种类数量 等于 牌数为3的牌种类数量
+        # 6. 数量为3个的牌连续
+        if len(count_card_map) == 2 \
+                and 3 in count_list \
+                and 2 in count_list \
+                and len(count_card_map[3]) >= 2 \
+                and len(count_card_map[2]) == len(count_card_map[3]) \
+                and CardOrder.__is_continuous(count_card_map[3]):
+            return CardOrder.CARD_ORDER_TYPE['飞机带对子'].value
+
+        #  特判特别的飞机带对子（比如两个飞机带四个相同的牌）
+        # 1. 有数量为3个的牌
+        # 2. 只能有牌为3张、2张、4张的（所以只判断没有数量为1的牌）
+        # 3. 数量为3个的牌大于等于2
+        # 4. 除【数量为3个的牌】其他牌数量/2 等于 牌数为3的牌种类数量
+        # 5. 数量为3个的牌连续
+        if 3 in count_list \
+                and 1 not in count_list \
+                and len(count_card_map[3]) >= 2 \
+                and (len(cards) - len(count_card_map[3]) * 3) / 2 == len(count_card_map[3]) \
+                and CardOrder.__is_continuous(count_card_map[3]):
+            return CardOrder.CARD_ORDER_TYPE['飞机带对子'].value
+
+        # 判断是否为炸弹
+        # 1. 计数只有1种
+        # 2. 有数量为4个的牌
+        # 3. 数量为4个的牌有1种
+        if len(count_card_map) == 1 \
+                and 4 in count_list \
+                and len(count_card_map[4]) == 1:
+            return CardOrder.CARD_ORDER_TYPE['炸弹'].value
+
+        # 判断为王炸
+        # 1. 计数只有1种
+        # 2. 有数量为1个的牌
+        # 3. 数量为1个的牌有2种
+        # 4. 大王在其中
+        # 5. 小王在其中
+        if len(count_card_map) == 1 \
+                and 1 in count_list \
+                and len(count_card_map[1]) == 2 \
+                and Card('大王', '').get_power() in count_card_map[1] \
+                and Card('小王', '').get_power() in count_card_map[1]:
+            return CardOrder.CARD_ORDER_TYPE['王炸'].value
+
+        return -1
+
+    # 判断数组是否连续
+    @staticmethod
+    def __is_continuous(arr):
+        arr.sort()
+        for i in range(1, len(arr)):
+            if arr[i] != arr[i - 1] + 1:
+                return False
+        return True
 
 
 class MyGame:
 
     def __init__(self, player_name, room_name):
+        global host
+        global port
         self.__player_name = player_name
         self.__room_name = room_name
 
@@ -49,17 +345,14 @@ class MyGame:
 
         # 加载卡片图片资源
         self.card_image_map = {}
-        for rank in RANKS:
-            for suit in SUITS:
+        for rank in Card.RANKS:
+            for suit in Card.SUITS:
                 self.card_image_map[suit + rank] = pygame.image.load(f"resources/cards/{suit}{rank}.png")
         self.card_image_map['小王'] = pygame.image.load(f"resources/cards/小王.png")
         self.card_image_map['大王'] = pygame.image.load(f"resources/cards/大王.png")
 
         # 创建 socket 对象
         self.__clientsocket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        # host = "39.107.228.202"
-        host = "127.0.0.1"
-        port = 9999
         self.__clientsocket.connect((host, port))
         self.__clientsocket.send((self.__room_name + "\n" + self.__player_name).encode("utf-8"))
         self.__clientsocket.setblocking(False)
@@ -121,6 +414,10 @@ class MyGame:
                     data = json.loads(data)
                     print(str(data))
                     if data['code'] == 0:
+
+                        # 这里的更新逻辑就是
+                        # 服务器传来那些字段 客户端就更新那些字段
+
                         obj = data['data']
                         if 'my_index' in obj.keys():
                             my_index = obj['my_index']
@@ -233,24 +530,24 @@ class MyGame:
 
                 marking = False  # 正在叫分
                 card_playing = False  # 正在出牌
-                free_do = False  # 任意牌
+                free_deal = False  # 任意牌
 
                 if state == PLAY_STATE.WAIT:
                     marking = False
                     card_playing = False
-                    free_do = False
+                    free_deal = False
                 elif state == PLAY_STATE.PLAYING:
                     marking = False
                     card_playing = True
-                    free_do = False
+                    free_deal = False
                 elif state == PLAY_STATE.FREE:
                     marking = False
                     card_playing = True
-                    free_do = True
+                    free_deal = True
                 elif state == PLAY_STATE.MARKING:
                     marking = True
                     card_playing = False
-                    free_do = False
+                    free_deal = False
                 else:
                     print(f"未设置的状态类型{state}")
 
@@ -335,7 +632,7 @@ class MyGame:
                             if card_playing:
 
                                 # 【不出】按钮
-                                if (not free_do) and 380 <= event.pos[0] <= 380 + 80:
+                                if (not free_deal) and 380 <= event.pos[0] <= 380 + 80:
                                     self.__clientsocket.send("pass".encode("utf-8"))
 
                                 # 【出牌】按钮
@@ -346,8 +643,13 @@ class MyGame:
                                         if card['name'] in my_card_choose_map.keys() and my_card_choose_map[card['name']]:
                                             choose_card_name_list.append(card['name'])
 
-                                    s = " ".join(choose_card_name_list)
-                                    self.__clientsocket.send(s.encode("utf-8"))
+                                    card_type = CardOrder.get_cards_type(choose_card_name_list)
+                                    if card_type == -1:
+                                        last_top_message = top_message
+                                        top_message = "出牌不符合规则"
+                                    else:
+                                        s = " ".join(choose_card_name_list) + f'{card_type:02}'
+                                        self.__clientsocket.send(s.encode("utf-8"))
 
 
                             # 如果正在叫分，则判断叫分按钮
@@ -391,7 +693,7 @@ class MyGame:
                 screen.blit(last_top_message_surface, (self.top_message_pos[0], self.top_message_pos[1] - 20))
 
                 # 如果为任意牌 就不展示上一个出牌内容了
-                if not free_do and len(last_card_list) != 0:
+                if not free_deal and len(last_card_list) != 0:
 
                     # 计算居中显示上一次出的牌
                     self.last_card_image_pos[0] = \
@@ -446,7 +748,7 @@ class MyGame:
 
                 if card_playing:
                     # 如果为任意牌 则显示灰色的【不出】按钮
-                    if free_do:
+                    if free_deal:
                         pygame.draw.rect(screen, (192, 192, 192), (380, 460, 80, 35), 0, border_radius=8)
                         screen.blit(font_button.render("不出", True, (0, 0, 0)), (400, 467))
                     else:
@@ -509,7 +811,65 @@ class Application(Frame):
             log.close()
 
 
+def test():
+    try:
+        assert CardOrder.get_cards_type(["♥3"]) == CardOrder.CARD_ORDER_TYPE["一张"].value
+        assert CardOrder.get_cards_type(["♥3", "♠3"]) == CardOrder.CARD_ORDER_TYPE["一对"].value
+
+        assert CardOrder.get_cards_type(["♥3", "♠3", "◆3"]) == CardOrder.CARD_ORDER_TYPE["三张"].value
+        assert CardOrder.get_cards_type(["♥3", "♠3", "◆3", "♥4", "♠4", "◆4"]) == CardOrder.CARD_ORDER_TYPE["双三张"].value
+
+        assert CardOrder.get_cards_type(["♥3", "♠3", "◆3", "♥4"]) == CardOrder.CARD_ORDER_TYPE["三带一"].value
+        assert CardOrder.get_cards_type(["♥3", "♠3", "◆3", "♥4", "♠4"]) == CardOrder.CARD_ORDER_TYPE["三带二"].value
+
+        assert CardOrder.get_cards_type(["♥3", "♠3", "◆3", "♣3", "♥4"]) == CardOrder.CARD_ORDER_TYPE["四带一"].value
+        assert CardOrder.get_cards_type(["♥3", "♠3", "◆3", "♣3", "♥4", "♠4"]) == CardOrder.CARD_ORDER_TYPE["四带二"].value
+        assert CardOrder.get_cards_type(["♥3", "♠3", "◆3", "♣3", "♥4", "♠5"]) == CardOrder.CARD_ORDER_TYPE["四带二"].value
+        assert CardOrder.get_cards_type(["♥3", "♠3", "◆3", "♣3", "♥4", "♠4", "♠5", "◆5", ]) == CardOrder.CARD_ORDER_TYPE["四带两对"].value
+        assert CardOrder.get_cards_type(["♥3", "♠3", "◆3", "♣3", "♥5", "♠4", "♠5", "◆5"]) == -1
+
+        assert CardOrder.get_cards_type(["♥3", "♥4", "♠5", "♠6", "♠7"]) == CardOrder.CARD_ORDER_TYPE["顺子"].value
+        assert CardOrder.get_cards_type(["♥3", "♥4", "♠5", "♥5", "♠3", "♠4"]) == CardOrder.CARD_ORDER_TYPE["连对"].value
+        assert CardOrder.get_cards_type(["♥3", "♥4", "♣5", "♥5", "◆3", "♣3"]) == -1
+
+        assert CardOrder.get_cards_type(["♥3", "◆3", "♣3", "♥4", "♠4", "◆4", "♥5", "♠5"]) == CardOrder.CARD_ORDER_TYPE["飞机"].value
+        assert CardOrder.get_cards_type(["♥3", "◆3", "♠3", "♥4", "♠4", "◆4", "♥5", "♠6"]) == CardOrder.CARD_ORDER_TYPE["飞机"].value
+        assert CardOrder.get_cards_type(["♥3", "◆3", "♠3", "♥4", "♠4", "◆4",
+                                         "♥5", "♠5", "◆5", "♣5"]) == CardOrder.CARD_ORDER_TYPE["飞机带对子"].value
+        assert CardOrder.get_cards_type(["♥3", "◆3", "♠3", "♥4", "♠4", "◆4",
+                                         "♥5", "♠5", "◆6", "♠6"]) == CardOrder.CARD_ORDER_TYPE["飞机带对子"].value
+        assert CardOrder.get_cards_type(["♥3", "◆3", "♠3", "♥4", "◆4", "♠4",
+                                         "♥5", "◆5", "♠5", "♥6", "◆6", "♠6"]) == CardOrder.CARD_ORDER_TYPE["飞机"].value
+        assert CardOrder.get_cards_type(["♥3", "◆3", "♠3", "♥4", "◆4", "♠4",
+                                         "♥5", "◆5", "♠5", "♥6", "◆6", "♠6",
+                                         "♥7", "◆7", "♠7", "♥8"]) == CardOrder.CARD_ORDER_TYPE["飞机"].value
+        assert CardOrder.get_cards_type(["♥3", "◆3", "♠3", "♥4", "◆4", "♠4",
+                                         "♥5", "◆5", "♠5", "♥6", "◆7", "♠8"]) == CardOrder.CARD_ORDER_TYPE["飞机"].value
+        assert CardOrder.get_cards_type(["♥3", "◆3", "♠3", "♥4", "◆4", "♠4",
+                                         "♥5", "◆5", "♠5", "♥6", "◆6", "♥7", "◆7", "♥8", "◆8"]) == CardOrder.CARD_ORDER_TYPE["飞机带对子"].value
+        assert CardOrder.get_cards_type(["♥3", "◆3", "♠3", "♥4", "◆4", "♠4",
+                                         "♥5", "◆5", "♠5", "♥6", "◆6", "♠6",
+                                         "♥7", "◆7", "♥8", "◆8"]) == CardOrder.CARD_ORDER_TYPE["飞机"].value
+        assert CardOrder.get_cards_type(["♥3", "◆3", "♠3", "♥4", "◆4", "♠4",
+                                         "♥5", "◆5", "♠5", "♥6", "◆6", "♠6",
+                                         "♥7", "◆7", "♠7", "♣7", "♥8", "◆8", "♠8", "♣8"]) == CardOrder.CARD_ORDER_TYPE["飞机带对子"].value
+
+        assert CardOrder.get_cards_type(["♥3", "♠3", "◆3", "♣3"]) == CardOrder.CARD_ORDER_TYPE["炸弹"].value
+        assert CardOrder.get_cards_type(["大王", "小王"]) == CardOrder.CARD_ORDER_TYPE["王炸"].value
+
+        assert len(set([Card("3", "♥"), Card("3", "♠"), Card("3", "♣"), Card("3", "◆")])) == 4
+
+    except Exception as ex:
+        print("没有通过测试")
+        print(ex.__str__())
+        raise ex
+
+
 if __name__ == '__main__':
+    if len(sys.argv) >= 2:
+        host = sys.argv[1]
+
+    test()
     root = Tk()
     root.title("加入房间")
     root.geometry("250x130+670+300")
